@@ -62,7 +62,7 @@ pub struct KiroProvider {
     /// 端点实现注册表（第一阶段只注册 ide）
     endpoints: HashMap<String, Arc<dyn KiroEndpoint>>,
     /// 默认端点名称
-    default_endpoint: String,
+    default_endpoint: RwLock<String>,
 }
 
 impl KiroProvider {
@@ -108,7 +108,7 @@ impl KiroProvider {
             global_proxy: RwLock::new(proxy),
             client_cache: Mutex::new(HashMap::new()),
             endpoints,
-            default_endpoint,
+            default_endpoint: RwLock::new(default_endpoint),
         }
     }
 
@@ -124,6 +124,17 @@ impl KiroProvider {
         self.client_cache.lock().clear();
 
         tracing::info!("全局代理配置已热更新，client_cache 已清空");
+        Ok(())
+    }
+
+    /// 热更新默认 endpoint
+    pub fn update_default_endpoint(&self, default_endpoint: String) -> anyhow::Result<()> {
+        if !self.endpoints.contains_key(&default_endpoint) {
+            return Err(anyhow::anyhow!("未知端点: {}", default_endpoint));
+        }
+
+        *self.default_endpoint.write() = default_endpoint;
+        tracing::info!("默认 endpoint 已热更新");
         Ok(())
     }
 
@@ -161,7 +172,8 @@ impl KiroProvider {
     }
 
     fn endpoint_for(&self, credentials: &KiroCredentials) -> anyhow::Result<Arc<dyn KiroEndpoint>> {
-        let name = credentials.effective_endpoint_name(Some(&self.default_endpoint));
+        let default_endpoint = self.default_endpoint.read();
+        let name = credentials.effective_endpoint_name(Some(default_endpoint.as_str()));
         self.endpoints
             .get(name)
             .cloned()
@@ -285,6 +297,7 @@ impl KiroProvider {
                     continue;
                 }
             };
+            let endpoint_name = endpoint.name();
             let request_ctx = RequestContext {
                 credentials: &ctx.credentials,
                 token: &ctx.token,
@@ -299,6 +312,12 @@ impl KiroProvider {
                     continue;
                 }
             };
+
+            tracing::debug!(
+                credential_id = %ctx.id,
+                endpoint = %endpoint_name,
+                "发送 MCP 请求"
+            );
             let client = self.get_client_for_credential(&ctx);
             let base_request = client
                 .post(&url)
@@ -333,6 +352,11 @@ impl KiroProvider {
             // 成功响应
             if status.is_success() {
                 self.token_manager.report_success(ctx.id);
+                tracing::info!(
+                    credential_id = %ctx.id,
+                    endpoint = %endpoint_name,
+                    "MCP 请求成功"
+                );
                 return Ok(McpCallResult {
                     response,
                     credential_id: ctx.id,
@@ -539,6 +563,7 @@ impl KiroProvider {
                     continue;
                 }
             };
+            let endpoint_name = endpoint.name();
             let request_ctx = RequestContext {
                 credentials: &ctx.credentials,
                 token: &ctx.token,
@@ -554,6 +579,13 @@ impl KiroProvider {
                 }
             };
             let final_body_for_log = final_body.clone();
+
+            tracing::debug!(
+                credential_id = %ctx.id,
+                endpoint = %endpoint_name,
+                "发送 {} API 请求",
+                api_type
+            );
 
             // 获取凭据对应的 client（支持凭据级代理）
             let client = self.get_client_for_credential(&ctx);
@@ -592,7 +624,11 @@ impl KiroProvider {
             // 成功响应
             if status.is_success() {
                 self.token_manager.report_success(ctx.id);
-                tracing::info!(credential_id = %ctx.id, "API 请求成功");
+                tracing::info!(
+                    credential_id = %ctx.id,
+                    endpoint = %endpoint_name,
+                    "API 请求成功"
+                );
                 // 后台异步刷新余额缓存
                 self.spawn_balance_refresh(ctx.id);
                 return Ok(ApiCallResult {

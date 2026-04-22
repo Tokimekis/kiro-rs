@@ -33,6 +33,7 @@ export function GlobalConfigDialog({ open, onOpenChange }: GlobalConfigDialogPro
   const [credentialRpm, setCredentialRpm] = useState('')
   const [promptCacheTtlSeconds, setPromptCacheTtlSeconds] = useState('300')
   const [promptCacheAccountingEnabled, setPromptCacheAccountingEnabled] = useState(true)
+  const [defaultEndpoint, setDefaultEndpoint] = useState('ide')
 
   // 代理设置
   const [proxyUrl, setProxyUrl] = useState('')
@@ -61,6 +62,7 @@ export function GlobalConfigDialog({ open, onOpenChange }: GlobalConfigDialogPro
       setCredentialRpm(globalConfig.credentialRpm?.toString() || '')
       setPromptCacheTtlSeconds(globalConfig.promptCacheTtlSeconds.toString())
       setPromptCacheAccountingEnabled(globalConfig.promptCacheAccountingEnabled)
+      setDefaultEndpoint(globalConfig.defaultEndpoint || 'ide')
       const c = globalConfig.compression
       setCEnabled(c.enabled)
       setCWhitespace(c.whitespaceCompression)
@@ -106,6 +108,11 @@ export function GlobalConfigDialog({ open, onOpenChange }: GlobalConfigDialogPro
 
     if (globalConfig && promptCacheAccountingEnabled !== globalConfig.promptCacheAccountingEnabled) {
       globalPayload.promptCacheAccountingEnabled = promptCacheAccountingEnabled
+      hasGlobalChanges = true
+    }
+
+    if (defaultEndpoint !== (globalConfig?.defaultEndpoint || 'ide')) {
+      globalPayload.defaultEndpoint = defaultEndpoint
       hasGlobalChanges = true
     }
 
@@ -220,6 +227,20 @@ export function GlobalConfigDialog({ open, onOpenChange }: GlobalConfigDialogPro
                   <p className="text-xs text-muted-foreground">关闭后立即停止输出和扣减本地 cache token</p>
                 </div>
                 <Switch checked={promptCacheAccountingEnabled} onCheckedChange={setPromptCacheAccountingEnabled} disabled={isPending} />
+              </div>
+              <div className="space-y-1">
+                <label htmlFor="gcDefaultEndpoint" className="text-sm font-medium">默认 Endpoint</label>
+                <select
+                  id="gcDefaultEndpoint"
+                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  value={defaultEndpoint}
+                  onChange={(e) => setDefaultEndpoint(e.target.value)}
+                  disabled={isPending}
+                >
+                  <option value="ide">ide</option>
+                  <option value="cli">cli</option>
+                </select>
+                <p className="text-xs text-muted-foreground">凭据未显式指定 endpoint 时使用此默认值</p>
               </div>
             </div>
 

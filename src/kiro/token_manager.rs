@@ -967,6 +967,11 @@ impl MultiTokenManager {
         self.config.write().region = region;
     }
 
+    /// 热更新默认 endpoint
+    pub fn update_default_endpoint(&self, default_endpoint: String) {
+        self.config.write().default_endpoint = default_endpoint;
+    }
+
     /// 热更新单凭据目标请求速率（RPM）
     pub fn update_credential_rpm(&self, rpm: Option<u32>) {
         // 更新 config 中的 credential_rpm

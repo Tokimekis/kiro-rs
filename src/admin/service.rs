@@ -817,6 +817,7 @@ impl AdminService {
             credential_rpm: config.credential_rpm,
             prompt_cache_ttl_seconds: config.prompt_cache_ttl_seconds,
             prompt_cache_accounting_enabled: config.prompt_cache_accounting_enabled,
+            default_endpoint: config.default_endpoint.clone(),
             compression: super::types::CompressionConfigResponse {
                 enabled: c.enabled,
                 whitespace_compression: c.whitespace_compression,
@@ -869,6 +870,27 @@ impl AdminService {
                 config.prompt_cache_accounting_enabled = enabled;
             }
 
+            if let Some(ref endpoint) = req.default_endpoint {
+                let trimmed = endpoint.trim();
+                if trimmed.is_empty() {
+                    return Err(AdminServiceError::InvalidRequest(
+                        "默认 endpoint 不能为空".to_string(),
+                    ));
+                }
+                if !self.known_endpoints.contains(trimmed) {
+                    return Err(AdminServiceError::InvalidRequest(format!(
+                        "未知的 endpoint: {}，可用值: {}",
+                        trimmed,
+                        self.known_endpoints
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )));
+                }
+                config.default_endpoint = trimmed.to_string();
+            }
+
             if let Some(c) = &req.compression {
                 Self::apply_compression_fields(&mut config.compression, c);
             }
@@ -890,6 +912,17 @@ impl AdminService {
         if req.credential_rpm.is_some() {
             self.token_manager
                 .update_credential_rpm(config.credential_rpm);
+        }
+
+        // 热更新 default_endpoint
+        if req.default_endpoint.is_some() {
+            self.token_manager
+                .update_default_endpoint(config.default_endpoint.clone());
+            if let Some(provider) = &self.kiro_provider
+                && let Err(e) = provider.update_default_endpoint(config.default_endpoint.clone())
+            {
+                tracing::warn!("热更新 KiroProvider default_endpoint 失败: {}", e);
+            }
         }
 
         // 热更新 Prompt Cache 运行时配置
