@@ -199,10 +199,6 @@ impl KiroProvider {
                     let remaining = resp.usage_limit() - resp.current_usage();
                     tm.update_balance_cache(id, remaining);
                     tracing::debug!("凭据 #{} 余额缓存已刷新: {:.2}", id, remaining);
-                    if remaining < 1.0 {
-                        tm.mark_insufficient_balance(id);
-                        tracing::warn!("凭据 #{} 余额不足 ({:.2})，已主动禁用", id, remaining);
-                    }
                 }
                 Err(e) => {
                     tracing::warn!("凭据 #{} 余额刷新失败: {}", id, e);
