@@ -14,7 +14,7 @@ COPY admin-ui/package.json ./
 # pnpm 10.x 会把 ignored build scripts 当作错误（ERR_PNPM_IGNORED_BUILDS）。
 # @swc/core 的平台专用二进制通过 optional dependencies 提供，
 # 不依赖 postinstall 脚本，--ignore-scripts 在容器构建中安全且更快。
-RUN npm install -g pnpm && pnpm install --ignore-scripts
+RUN npm config set registry https://repo.huaweicloud.com/repository/npm/ && npm install -g pnpm && pnpm install --ignore-scripts
 COPY admin-ui ./
 RUN pnpm build
 

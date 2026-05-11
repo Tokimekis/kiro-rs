@@ -1106,36 +1106,14 @@ impl MultiTokenManager {
         );
     }
 
-    /// 选择最佳凭据（使用次数最少优先；相同则轮询）
+    /// 选择凭据（纯轮询，均匀分配请求）
     fn select_best_candidate_id(&self, candidate_ids: &[u64]) -> Option<u64> {
         if candidate_ids.is_empty() {
             return None;
         }
-
         let rr = self.selection_rr.fetch_add(1, Ordering::Relaxed) as usize;
-        let cache = self.balance_cache.lock();
-
-        let mut scored: Vec<(u64, u32)> = Vec::with_capacity(candidate_ids.len());
-        for &id in candidate_ids {
-            let (usage, initialized) = cache
-                .get(&id)
-                .map(|c| (c.recent_usage, c.initialized))
-                .unwrap_or((0, false));
-            let effective_usage = if initialized { usage } else { u32::MAX };
-            scored.push((id, effective_usage));
-        }
-
-        // 使用次数最少优先
-        let min_usage = scored.iter().map(|(_, usage)| *usage).min()?;
-        scored.retain(|(_, usage)| *usage == min_usage);
-
-        if scored.len() == 1 {
-            return Some(scored[0].0);
-        }
-
-        // 相同则轮询
-        let index = rr % scored.len();
-        Some(scored[index].0)
+        let index = rr % candidate_ids.len();
+        Some(candidate_ids[index])
     }
 
     /// 获取 API 调用上下文
@@ -2255,16 +2233,6 @@ impl MultiTokenManager {
         self.affinity.remove_by_credential(id);
     }
 
-    /// 标记凭据为余额不足（不会被自动恢复）
-    pub fn mark_insufficient_balance(&self, id: u64) {
-        let mut entries = self.entries.lock();
-        if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-            entry.disabled = true;
-            entry.auto_heal_reason = None; // 清除自愈原因，防止被自愈循环错误恢复
-            entry.disable_reason = Some(DisableReason::InsufficientBalance);
-            tracing::warn!("凭据 #{} 已标记为余额不足", id);
-        }
-    }
 
     /// 获取全局恢复时间（用于 Admin API）
     #[allow(dead_code)]

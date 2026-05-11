@@ -34,3 +34,4 @@ config/
 tmp/
 .planning/
 
+kiro-rs.tar
