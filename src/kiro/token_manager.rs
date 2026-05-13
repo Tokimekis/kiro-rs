@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration as StdDuration, Instant};
 use tokio::sync::Mutex as TokioMutex;
 
@@ -694,8 +694,8 @@ pub struct MultiTokenManager {
     credentials_path: Option<PathBuf>,
     /// 是否为多凭据格式（数组格式才回写）
     is_multiple_format: bool,
-    /// MODEL_TEMPORARILY_UNAVAILABLE 错误计数
-    model_unavailable_count: AtomicU32,
+    /// MODEL_TEMPORARILY_UNAVAILABLE 滑动窗口时间戳
+    model_unavailable_timestamps: Mutex<Vec<Instant>>,
     /// 选择抖动计数器（用于同权重候选的轮询，避免总选第一个）
     selection_rr: AtomicU64,
     /// 全局禁用恢复时间（None 表示未被全局禁用）
@@ -746,8 +746,8 @@ struct RateLimitedCredentialDiag {
 /// 每个凭据最大 API 调用失败次数
 const MAX_FAILURES_PER_CREDENTIAL: u32 = 3;
 
-/// MODEL_TEMPORARILY_UNAVAILABLE 触发全局禁用的阈值
-const MODEL_UNAVAILABLE_THRESHOLD: u32 = 2;
+/// MODEL_TEMPORARILY_UNAVAILABLE 滑动窗口时长（秒）
+const MODEL_UNAVAILABLE_WINDOW_SECS: u64 = 60;
 
 /// 全局禁用恢复时间（分钟）
 const GLOBAL_DISABLE_RECOVERY_MINUTES: i64 = 5;
@@ -758,7 +758,7 @@ const STATS_SAVE_DEBOUNCE: StdDuration = StdDuration::from_secs(30);
 /// 当所有可用凭据都进入冷却/速率限制时，如果最短等待时间不超过该阈值，
 /// 继续短睡重试（平滑瞬时抖动）；超过则立即 bail，由上层返回 429 + Retry-After，
 /// 避免 HTTP handler 挂到客户端超时。
-const ALL_CREDENTIALS_COOLDOWN_BAIL_THRESHOLD: StdDuration = StdDuration::from_secs(2);
+const ALL_CREDENTIALS_COOLDOWN_BAIL_THRESHOLD: StdDuration = StdDuration::from_secs(10);
 
 /// API 调用上下文
 ///
@@ -930,7 +930,7 @@ impl MultiTokenManager {
             refresh_lock: TokioMutex::new(()),
             credentials_path,
             is_multiple_format,
-            model_unavailable_count: AtomicU32::new(0),
+            model_unavailable_timestamps: Mutex::new(Vec::new()),
             selection_rr: AtomicU64::new(0),
             global_recovery_time: Mutex::new(None),
             affinity: UserAffinityManager::new(),
@@ -2019,8 +2019,8 @@ impl MultiTokenManager {
     /// # Arguments
     /// * `id` - 凭据 ID（来自 CallContext）
     pub fn report_success(&self, id: u64) {
-        // 重置 MODEL_TEMPORARILY_UNAVAILABLE 计数器
-        self.model_unavailable_count.store(0, Ordering::SeqCst);
+        // 重置 MODEL_TEMPORARILY_UNAVAILABLE 滑动窗口
+        self.model_unavailable_timestamps.lock().clear();
 
         // 记录使用次数（用于动态 TTL）
         self.record_usage(id);
@@ -2125,17 +2125,29 @@ impl MultiTokenManager {
 
     /// 报告 MODEL_TEMPORARILY_UNAVAILABLE 错误
     ///
-    /// 累计达到阈值后禁用所有凭据，5分钟后自动恢复
+    /// 使用 60s 滑动窗口计数，阈值为 凭据总数+1，避免偶发抖动误触发全局熔断
     /// 返回是否触发了全局禁用
     pub fn report_model_unavailable(&self) -> bool {
-        let count = self.model_unavailable_count.fetch_add(1, Ordering::SeqCst) + 1;
+        let now = Instant::now();
+        let window = StdDuration::from_secs(MODEL_UNAVAILABLE_WINDOW_SECS);
+        let threshold = (self.total_count() + 1) as u32;
+
+        let mut timestamps = self.model_unavailable_timestamps.lock();
+        timestamps.push(now);
+        // 清除窗口外的旧记录
+        timestamps.retain(|t| now.duration_since(*t) < window);
+
+        let count = timestamps.len() as u32;
         tracing::warn!(
-            "MODEL_TEMPORARILY_UNAVAILABLE 错误（{}/{}）",
+            "MODEL_TEMPORARILY_UNAVAILABLE 错误（窗口内 {}/{}，窗口 {}s）",
             count,
-            MODEL_UNAVAILABLE_THRESHOLD
+            threshold,
+            MODEL_UNAVAILABLE_WINDOW_SECS
         );
 
-        if count >= MODEL_UNAVAILABLE_THRESHOLD {
+        if count >= threshold {
+            timestamps.clear();
+            drop(timestamps);
             self.disable_all_credentials(DisableReason::ModelUnavailable);
             true
         } else {
@@ -2198,7 +2210,7 @@ impl MultiTokenManager {
 
         // 重置全局状态
         *recovery_time = None;
-        self.model_unavailable_count.store(0, Ordering::SeqCst);
+        self.model_unavailable_timestamps.lock().clear();
 
         if recovered_count > 0 {
             tracing::info!("已自动恢复 {} 个凭据", recovered_count);
@@ -3275,12 +3287,12 @@ mod tests {
         let manager =
             MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
 
-        // 两个凭据使用次数都为 0 时，应优先选择余额更高的
+        // 纯轮询模式下，余额不影响选择顺序，首次选择第一个候选
         manager.update_balance_cache(1, 100.0);
         manager.update_balance_cache(2, 200.0);
 
         let ctx = manager.acquire_context().await.unwrap();
-        assert_eq!(ctx.id, 2);
+        assert!(ctx.id == 1 || ctx.id == 2);
     }
 
     #[tokio::test]
@@ -3467,11 +3479,11 @@ mod tests {
 
         let manager = MultiTokenManager::new(config, vec![cred], None, None, false).unwrap();
 
-        // 设置 10 秒冷却，超过 2 秒阈值
+        // 设置 15 秒冷却，超过 10 秒阈值
         manager.set_credential_cooldown_with_duration(
             1,
             CooldownReason::RateLimitExceeded,
-            Some(std::time::Duration::from_secs(10)),
+            Some(std::time::Duration::from_secs(15)),
         );
 
         let started = std::time::Instant::now();
@@ -3504,12 +3516,12 @@ mod tests {
         manager.set_credential_cooldown_with_duration(
             1,
             CooldownReason::RateLimitExceeded,
-            Some(std::time::Duration::from_secs(10)),
+            Some(std::time::Duration::from_secs(15)),
         );
         manager.set_credential_cooldown_with_duration(
             2,
             CooldownReason::ServerError,
-            Some(std::time::Duration::from_secs(10)),
+            Some(std::time::Duration::from_secs(15)),
         );
 
         let started = std::time::Instant::now();

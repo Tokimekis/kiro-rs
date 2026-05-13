@@ -38,7 +38,7 @@ impl CooldownReason {
     pub fn default_duration(&self) -> Duration {
         match self {
             // 短冷却（1-5 分钟）
-            CooldownReason::RateLimitExceeded => Duration::from_secs(60),
+            CooldownReason::RateLimitExceeded => Duration::from_secs(10),
             CooldownReason::TokenRefreshFailed => Duration::from_secs(60),
             CooldownReason::ServerError => Duration::from_secs(120),
             CooldownReason::ModelUnavailable => Duration::from_secs(300),
@@ -118,7 +118,7 @@ impl CooldownManager {
     pub fn new() -> Self {
         Self {
             entries: Mutex::new(HashMap::new()),
-            max_short_cooldown_secs: 300, // 5 分钟
+            max_short_cooldown_secs: 180, // 3 分钟
             long_cooldown_secs: 86400,    // 24 小时
         }
     }
@@ -300,7 +300,7 @@ mod tests {
         let manager = CooldownManager::new();
 
         let duration = manager.set_cooldown(1, CooldownReason::RateLimitExceeded);
-        assert!(duration.as_secs() >= 60);
+        assert!(duration.as_secs() >= 10);
 
         let (reason, remaining) = manager.check_cooldown(1).unwrap();
         assert_eq!(reason, CooldownReason::RateLimitExceeded);

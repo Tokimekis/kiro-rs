@@ -41,11 +41,8 @@ const MAX_RETRIES_PER_CREDENTIAL: usize = 2;
 /// 总重试次数硬上限（避免无限重试）
 const MAX_TOTAL_RETRIES: usize = 3;
 
-/// 429 冷却默认时长（无 Retry-After 时使用 CooldownManager 的默认递增策略）
-const DEFAULT_RATE_LIMIT_COOLDOWN_SECS: u64 = 60;
-
 /// 429 冷却最大时长上限（避免异常 Retry-After 把单号挂死太久）
-const MAX_RATE_LIMIT_COOLDOWN_SECS: u64 = 300;
+const MAX_RATE_LIMIT_COOLDOWN_SECS: u64 = 180;
 
 /// Kiro API Provider
 ///
@@ -919,10 +916,7 @@ impl KiroProvider {
     }
 
     fn clamp_rate_limit_cooldown(duration: Duration) -> Duration {
-        duration.clamp(
-            Duration::from_secs(DEFAULT_RATE_LIMIT_COOLDOWN_SECS),
-            Duration::from_secs(MAX_RATE_LIMIT_COOLDOWN_SECS),
-        )
+        duration.min(Duration::from_secs(MAX_RATE_LIMIT_COOLDOWN_SECS))
     }
 
     fn is_rate_limit_response(body: &str) -> bool {
@@ -1418,13 +1412,13 @@ mod tests {
         headers.insert("retry-after", HeaderValue::from_static("5"));
         assert_eq!(
             KiroProvider::parse_retry_after(&headers).unwrap(),
-            Duration::from_secs(60)
+            Duration::from_secs(5)
         );
 
         headers.insert("retry-after", HeaderValue::from_static("600"));
         assert_eq!(
             KiroProvider::parse_retry_after(&headers).unwrap(),
-            Duration::from_secs(300)
+            Duration::from_secs(180)
         );
     }
 
@@ -1483,7 +1477,7 @@ mod tests {
         let provider = create_test_provider(config, credentials);
 
         let cooldown = provider.handle_rate_limited_response(1, "Too many requests", None);
-        assert_eq!(cooldown, Duration::from_secs(60));
+        assert_eq!(cooldown, Duration::from_secs(10));
 
         let (reason, remaining) = provider
             .token_manager()
@@ -1491,8 +1485,8 @@ mod tests {
             .check_cooldown(1)
             .unwrap();
         assert_eq!(reason, CooldownReason::RateLimitExceeded);
-        assert!(remaining <= Duration::from_secs(60));
-        assert!(remaining > Duration::from_secs(50));
+        assert!(remaining <= Duration::from_secs(10));
+        assert!(remaining > Duration::from_secs(5));
     }
 
     #[test]
